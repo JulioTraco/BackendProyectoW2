@@ -9,9 +9,7 @@ from auth import (
     hash_password,
     verify_password,
     create_access_token,
-    decode_token,
-    get_token_from_cookie,
-    get_token_from_header,
+    decode_access_token   # ← así se llama en auth.py
 )
 
 # Crea las tablas en la DB al arrancar la app
