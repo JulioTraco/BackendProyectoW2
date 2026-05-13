@@ -1,52 +1,39 @@
-from fastapi import FastAPI, Depends, HTTPException, status, Request, Response
+from fastapi import FastAPI, Depends, HTTPException, Cookie, Header, Response
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlmodel import Session, select
 
-from database import engine, get_db, Base
-from models import User
-from schemas import UserCreate, UserLogin, UserResponse
-from auth import (
-    hash_password,
-    verify_password,
-    create_access_token,
-    decode_access_token   # ← así se llama en auth.py
-)
+import models
+import schemas
+import auth
+from database import create_db, get_db
 
-# Crea las tablas en la DB al arrancar la app
-Base.metadata.create_all(bind=engine)
+# Crea las tablas al arrancar
+create_db()
 
-app = FastAPI(title="Auth API - Segundo Parcial")
+app = FastAPI(title="Proyecto Parcial 2 - Auth API")
 
-# ——— CORS ———
-# Permite que el frontend (en otro puerto) se comunique con este backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5500", "http://127.0.0.1:5500"],  # Puerto del Live Server 
-    allow_credentials=True,   
+    allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
 # POST /crear-usuario
-@app.post("/crear-usuario", response_model=UserResponse, status_code=201)
-def crear_usuario(user_data: UserCreate, db: Session = Depends(get_db)):
-    """
-    Registra un nuevo usuario en la base de datos.
-    La contraseña se guarda hasheada con bcrypt.
-    """
-    # Verificar que el userName no esté tomado
-    existing = db.query(User).filter(User.userName == user_data.userName).first()
+@app.post("/crear-usuario", response_model=schemas.UserResponse, status_code=201)
+def crear_usuario(user_data: schemas.UserCreate, db: Session = Depends(get_db)):
+    """Crea un nuevo usuario con la contraseña hasheada con Argon2."""
+    existing = db.exec(select(models.User).where(models.User.userName == user_data.userName)).first()
     if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="El userName ya está en uso"
-        )
+        raise HTTPException(status_code=400, detail="El userName ya está en uso")
 
-    new_user = User(
+    new_user = models.User(
         userName=user_data.userName,
         name=user_data.name,
-        password=hash_password(user_data.password),
+        password=auth.hash_password(user_data.password)
     )
     db.add(new_user)
     db.commit()
@@ -54,78 +41,74 @@ def crear_usuario(user_data: UserCreate, db: Session = Depends(get_db)):
     return new_user
 
 
-
-# POST /login
+# POST /login  (OAuth2 — recibe form-data)
 @app.post("/login")
-def login(credentials: UserLogin, response: Response, db: Session = Depends(get_db)):
+def login(
+    response: Response,
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
+):
     """
-    Autentica al usuario y devuelve un JWT de dos formas:
-      1. En el body JSON  → para que el frontend lo use como header Bearer
-      2. En una cookie httpOnly → el navegador la manda automáticamente
+    Login con OAuth2 (form-data, no JSON).
+    - Si las credenciales son incorrectas hace un hasheo dummy para
+      responder siempre en el mismo tiempo (evita timing attacks).
+    - Si son correctas devuelve el JWT en el body Y lo manda como cookie httpOnly.
     """
-    user = db.query(User).filter(User.userName == credentials.userName).first()
+    user = db.exec(select(models.User).where(models.User.userName == form_data.username)).first()
 
-    if not user or not verify_password(credentials.password, user.password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Credenciales incorrectas"
-        )
+    if not user:
+        auth.dummy_hash()  # tiempo constante aunque el usuario no exista
+        raise HTTPException(status_code=401, detail="Credenciales incorrectas")
 
-    token = create_access_token(data={"sub": user.userName})
+    if not auth.verify_password(form_data.password, user.password):
+        raise HTTPException(status_code=401, detail="Credenciales incorrectas")
 
-    # Guardar en cookie httpOnly 
+    token = auth.create_access_token(data={"sub": user.userName})
+
+    # Cookie httpOnly, el navegador la manda automáticamente, JS no puede leerla
     response.set_cookie(
         key="access_token",
         value=token,
-        httponly=True,       
-        samesite="lax",      
-        max_age=3600,        
+        httponly=True,
+        samesite="lax",
+        max_age=180  #3 minutos en segundos
     )
 
     return {
         "message": "Login exitoso",
-        "access_token": token,   
-        "token_type": "bearer",
+        "access_token": token,
+        "token_type": "bearer"
     }
 
 
-# GET /me  (vía cookie)
-@app.get("/me/cookie", response_model=UserResponse)
-def get_me_cookie(request: Request, db: Session = Depends(get_db)):
+# GET /users/me  (cookie O header)
+@app.get("/users/me", response_model=schemas.UserResponse)
+def get_me(
+    db: Session = Depends(get_db),
+    access_token: str | None = Cookie(default=None),
+    authorization: str | None = Header(default=None)
+):
     """
-    Devuelve la info del usuario autenticado.
-    Lee el token desde la cookie httpOnly.
+    Devuelve info del usuario autenticado.
+    Acepta el token desde cookie httpOnly O desde header Authorization: Bearer.
     """
-    token = get_token_from_cookie(request)
-    payload = decode_token(token)
-    userName = payload.get("sub")
+    token = None
 
-    user = db.query(User).filter(User.userName == userName).first()
+    if access_token:
+        token = access_token
+    elif authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ")[1]
+
+    if not token:
+        raise HTTPException(status_code=401, detail="No se proporcionó token de autenticación")
+
+    payload = auth.decode_access_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Token inválido o expirado")
+
+    userName = payload.get("sub")
+    user = db.exec(select(models.User).where(models.User.userName == userName)).first()
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
     return user
-
-
-# GET /me  
-@app.get("/me/header", response_model=UserResponse)
-def get_me_header(request: Request, db: Session = Depends(get_db)):
-    """
-    Devuelve la info del usuario autenticado.
-    Lee el token desde el header: Authorization: Bearer <token>
-    """
-    token = get_token_from_header(request)
-    payload = decode_token(token)
-    userName = payload.get("sub")
-
-    user = db.query(User).filter(User.userName == userName).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    return user
-
-
-# POST /logout 
-@app.post("/logout")
-def logout(response: Response):
-    """Elimina la cookie de autenticación."""
-    response.delete_cookie("access_token")
-    return {"message": "Sesión cerrada"}

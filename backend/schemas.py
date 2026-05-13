@@ -1,24 +1,22 @@
-from pydantic import BaseModel
+from sqlmodel import SQLModel
 
 
-# endpoint /crear-usuario
-class UserCreate(BaseModel):
+# Lo que recibe el endpoint /crear-usuario
+class UserCreate(SQLModel):
     userName: str
     name: str
     password: str
 
 
-# endpoint /login
-class UserLogin(BaseModel):
+# Lo que recibe el endpoint /login
+class UserLogin(SQLModel):
     userName: str
     password: str
 
 
-# /me
-class UserResponse(BaseModel):
+# Lo que devuelve /users/me (nunca devolvemos el password)
+class UserResponse(SQLModel):
     id: int
     userName: str
     name: str
-
-    class Config:
-        from_attributes = True  
+    password: str  # devolvemos el hash como pide el profe
