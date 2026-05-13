@@ -1,11 +1,15 @@
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 import bcrypt
+import os
+from dotenv import load_dotenv
 
-#Clave secreta para firmar los tokens JWT
-SECRET_KEY = "clave-super-secreta-cambiame-en-produccion"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60  #1 hora de token
+load_dotenv()
+
+#Lee los valores del .env — nunca hardcodeados en el código
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM = os.getenv("ALGORITHM")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES"))
 
 
 def hash_password(password: str) -> str:
@@ -21,7 +25,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def create_access_token(data: dict) -> str:
     """
     Crea un JWT con los datos del usuario.
-    El token incluye una fecha de expiración automática.
+    El token incluye una fecha de expiración automática (leída del .env).
     """
     to_encode = data.copy()
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
